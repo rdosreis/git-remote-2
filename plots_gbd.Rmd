@@ -1,0 +1,366 @@
+---
+title: "GBD Plots"
+output: html_document
+date: "2023-04-16"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = F, message = F)
+```
+
+```{r}
+pacman::p_load(tidyverse,
+               tidylog,
+               readxl,
+               ggrepel,
+               broom)
+# install fira theme
+remotes::install_github("vankesteren/firatheme")
+
+dt <- read_csv("IHME-GBD_2019_DATA-94ba0dda-1.csv")
+
+# Convert negative to positive
+dt <- dt |> mutate(val=abs(val))
+
+# Make cause as dm and others
+dt <- dt |> mutate(cause_name=if_else(cause_name=="Diabetes mellitus",
+                                "Diabetes mellitus",
+                                "Other causes"))
+
+dt_plot <- dt |> 
+  group_by(rei_name, year, measure_name, cause_name) |> 
+  summarise(n=sum(val)) |> 
+  group_by(rei_name) |> # trick to filter only risk factors with dm
+  filter(any(cause_name=="Diabetes mellitus")) |> 
+  mutate(vals_90_19 = if_else(year==1990,-1,1),
+         vals_plot = vals_90_19*n) 
+
+
+abs_comma <- function (x, ...) {
+  format(abs(x), ..., big.mark = ",", scientific = FALSE, trim = TRUE)
+}
+```
+
+# Plot DM2 - DALYs/YLLs/Deaths/YLDs
+
+```{r}
+dt_plot |> filter(rei_name!="All risk factors") |> 
+  ggplot(aes(x = vals_plot, y = rei_name, fill = cause_name)) +
+  geom_col(position = position_dodge(), width = 0.5) +
+  geom_vline(xintercept = 0, linetype=2) +
+  facet_wrap(~measure_name,
+             scales = "free_x")+
+  scale_x_continuous(labels = abs_comma) +
+  annotate("text",x=-Inf,y=-Inf, label="1990", vjust=3, hjust=-1)+  #annotate years
+  annotate("text",x=Inf,y=-Inf, label="2019", vjust=3, hjust=2)+
+  coord_cartesian(clip = "off")+
+  labs(x="", y="", fill="Cause")+
+  paletteer::scale_fill_paletteer_d("colorblindr::OkabeIto")+
+  theme_minimal()+
+  theme(legend.position = "bottom",
+        panel.spacing.y = unit(2, "lines"))  #increase space facets
+```
+
+```{r}
+ts_dt <- read_excel("life_table_pronta.xlsx")
+uf_cod <- read_excel("codigos_uf.xlsx")  
+
+ts_dt |> left_join(uf_cod, by=c("location_name"="nome_uf")) |> 
+  mutate(regiao=str_sub(cod_uf,1,1),
+         probability=as.numeric(probability),
+         age_group_name=fct_relevel(age_group_name,
+                                    "born")) |> 
+  ggplot(aes(x=year_id,
+             y=probability,
+             group=location_name,
+             color=location_name))+
+  geom_line(linewidth=0.8,alpha=0.7)+
+  geom_label_repel(
+    aes(label = sigla_uf),
+    min.segment.length = 0,
+    segment.linetype=2,
+    box.padding = 0.5,
+    data = . %>%
+      filter(year_id == min(year_id)),
+    max.overlaps = 50
+  )+
+  labs(x="Year",
+       y="Probability of death  due to DM2")+
+  scale_x_continuous(expand = c(0.1,.1))+
+  coord_cartesian(clip = "off")+
+  facet_grid(regiao~age_group_name,
+             labeller = as_labeller(
+               c("1"="North",
+                 "2"="Northeast",
+                 "3"="Southeast",
+                 "4"="South",
+                 "5"="Central-west",
+                 "born"="At born",
+                 "70 to 74"="At 70-74 y.o.")
+             ))+
+  firatheme::theme_fira()+
+  theme(legend.position = "none",
+        panel.spacing.y = unit(1.5,"lines"))
+
+
+
+mod_prob <- function(df){
+  lm(probability ~ year_id, data=df)
+}
+
+ts_by_uf <- ts_dt |> left_join(uf_cod, by=c("location_name"="nome_uf")) |> 
+  mutate(regiao=str_sub(cod_uf,1,1),
+         probability=as.numeric(probability),
+         age_group_name=fct_relevel(age_group_name,
+                                    "born")) |> 
+  group_by(location_name,
+           age_group_name) |> 
+  nest()
+```
+
+# Plot coefficients lm
+
+$$
+E(probability_{(t)}) \sim year_{(t)}
+$$
+
+```{r}
+ts_by_uf |> left_join(uf_cod, by=c("location_name"="nome_uf")) |> 
+  mutate(regiao=str_sub(cod_uf,1,1)) |> 
+mutate(fit=map(data,mod_prob)) |> 
+  mutate(coef=map(fit,tidy,conf.int=T))  |> 
+  unnest(coef) |> 
+  filter(term=="year_id") |> ungroup() |> 
+  mutate(location_name=fct_reorder(location_name,cod_uf)) |> 
+  ggplot(aes(location_name,estimate, color=regiao))+
+  geom_pointrange(aes(ymin=conf.low,ymax=conf.high))+facet_wrap(~age_group_name,
+                                                                labeller = as_labeller(
+                                                                  c("born"="At born",
+                                                                    "70 to 74" = "At 70-74 y.o.")
+                                                                ))+
+  labs(x="State",
+       y="Linear coefficient",
+       title="Trends of probability of death due to DM2")+
+  guides(color="none")+
+  coord_flip()+
+  firatheme::theme_fira()
+```
+
+# Plot coefficients diff
+
+$$
+E(probability_{(t)} - probability_{(t-1)}) \sim year_{(t)}
+$$
+
+
+```{r}
+# Diffs -------------------------------------------------------------------
+
+ts_by_uf_diff <- ts_dt |> left_join(uf_cod, by=c("location_name"="nome_uf")) |> 
+  mutate(regiao=str_sub(cod_uf,1,1),
+         probability=as.numeric(probability),
+         age_group_name=fct_relevel(age_group_name,
+                                    "born")) |> 
+  group_by(location_name,
+           age_group_name) |> 
+  mutate(diff_prob = probability- lag(probability)) |> 
+  nest()
+
+mod_prob_diff <- function(df){
+  lm(diff_prob ~ year_id, data=df)
+}
+
+ts_by_uf_diff |> left_join(uf_cod, by=c("location_name"="nome_uf")) |> 
+  mutate(regiao=str_sub(cod_uf,1,1)) |> 
+  mutate(fit=map(data,mod_prob_diff)) |> 
+  mutate(coef=map(fit,tidy,conf.int=T))  |> 
+  unnest(coef) |> 
+  filter(term=="year_id") |> ungroup() |> 
+  mutate(location_name=fct_reorder(location_name,cod_uf)) |> 
+  ggplot(aes(location_name,estimate, color=regiao))+
+  geom_pointrange(aes(ymin=conf.low,ymax=conf.high))+facet_wrap(~age_group_name,
+                                                                labeller = as_labeller(
+                                                                  c("born"="At born",
+                                                                    "70 to 74" = "At 70-74 y.o.")
+                                                                ))+
+  labs(x="State",
+       y="Linear coefficient",
+       title="Trends of probability of death due to DM2")+
+  guides(color="none")+
+  coord_flip()+
+  firatheme::theme_fira()
+
+```
+
+# Effect state
+
+
+$$
+E(probability_{(t)} - probability_{(t-1)}) \sim state_{i} + year_{(t)}
+$$
+
+```{r}
+
+mod_prob_diff_2 <- function(df){
+  lm(diff_prob ~ location_name+year_id, data=df)
+}
+ts_dt |> left_join(uf_cod, by=c("location_name"="nome_uf")) |> 
+  mutate(regiao=str_sub(cod_uf,1,1),
+         probability=as.numeric(probability),
+         age_group_name=fct_relevel(age_group_name,
+                                    "born")) |> 
+  group_by(location_name,
+           age_group_name) |> 
+  mutate(diff_prob = probability- lag(probability)) |> 
+  group_by(age_group_name) |> 
+  nest() |> 
+  mutate(fit=map(data,mod_prob_diff_2)) |> 
+  mutate(coef=map(fit,tidy,conf.int=T))  |> 
+  unnest(coef) |> 
+  ungroup() |> 
+  mutate(term=str_remove(term,"location_name")) |> 
+  add_row(age_group_name=c("born","70 to 74"),
+          term=c("Acre","Acre"),
+          estimate=c(0,0),
+          conf.low=c(0,0),
+          conf.high=c(0,0)) |> 
+  filter(term!="(Intercept)",
+         term!="year_id") |> 
+  mutate(term=fct_relevel(term,
+                          "Acre")) |> 
+  ggplot(aes(term,estimate))+
+  geom_pointrange(aes(ymin=conf.low,ymax=conf.high))+facet_wrap(~age_group_name,
+                                                                labeller = as_labeller(
+                                                                  c("born"="At born",
+                                                                    "70 to 74" = "At 70-74 y.o.")
+                                                                ))+
+  labs(x="State",
+       y="Linear coefficient",
+       title="Trends of probability of death due to DM2")+
+  guides(color="none")+
+  coord_flip()+
+  firatheme::theme_fira()
+  
+
+```
+
+
+
+```{r}
+ts_dt |> left_join(uf_cod, by=c("location_name"="nome_uf")) |> 
+  mutate(regiao=str_sub(cod_uf,1,1),
+         probability=as.numeric(probability),
+         age_group_name=fct_relevel(age_group_name,
+                                    "born")) |> 
+  group_by(location_name,
+           age_group_name) |> 
+  mutate(diff_prob = probability- lag(probability)) |> 
+  group_by(age_group_name) |> 
+    mutate(regiao=str_sub(cod_uf,1,1),
+         probability=as.numeric(probability),
+         age_group_name=fct_relevel(age_group_name,
+                                    "born")) |> 
+  group_by(regiao, age_group_name, year_id) |> 
+  mutate(diff_average=mean(diff_prob)) |> 
+  ungroup() |> 
+  ggplot(aes(x=year_id,
+             y=diff_prob,
+             group=location_name,
+             color=location_name))+
+  geom_line(linewidth=0.8,alpha=0.7)+
+  geom_label_repel(
+    aes(label = sigla_uf),
+    min.segment.length = 0,
+    segment.linetype=2,
+    box.padding = 0.5,
+    data = . %>%
+      filter(year_id == min(year_id)),
+    max.overlaps = 50
+  )+
+  labs(x="Year",
+       y="Variation of probability of death  due to DM2")+
+  scale_x_continuous(expand = c(0.1,.1))+
+  coord_cartesian(clip = "off")+
+  facet_grid(regiao~age_group_name,
+             labeller = as_labeller(
+               c("1"="North",
+                 "2"="Northeast",
+                 "3"="Southeast",
+                 "4"="South",
+                 "5"="Central-west",
+                 "born"="At born",
+                 "70 to 74"="At 70-74 y.o.")
+             ))+
+  firatheme::theme_fira()+
+  theme(legend.position = "none",
+        panel.spacing.y = unit(1.5,"lines"))
+  
+  
+ts1 <- ts_dt |> left_join(uf_cod, by=c("location_name"="nome_uf")) |> 
+  mutate(regiao=str_sub(cod_uf,1,1),
+         probability=as.numeric(probability),
+         age_group_name=fct_relevel(age_group_name,
+                                    "born")) |> 
+  group_by(location_name,
+           age_group_name) |> 
+  mutate(diff_prob = probability- lag(probability)) |> 
+  group_by(age_group_name) |> 
+    mutate(regiao=str_sub(cod_uf,1,1),
+         probability=as.numeric(probability),
+         age_group_name=fct_relevel(age_group_name,
+                                    "born")) |> 
+  group_by(regiao, age_group_name, year_id) |> 
+  mutate(diff_average=mean(diff_prob))
+  
+ggplot()+
+  geom_line(data=ts1,
+            aes(x=year_id,
+             y=diff_prob,
+             group=location_name,
+             color=location_name),
+    linewidth=0.8,alpha=0.7)+
+  geom_line(data= ts1,aes(x=year_id,
+                          y=diff_average), linewidth=0.8,alpha=0.7)+
+  labs(x="Year",
+       y="Variation of probability of death  due to DM2")+
+  scale_x_continuous(expand = c(0.1,.1))+
+  coord_cartesian(clip = "off")+
+  facet_grid(regiao~age_group_name,
+             labeller = as_labeller(
+               c("1"="North",
+                 "2"="Northeast",
+                 "3"="Southeast",
+                 "4"="South",
+                 "5"="Central-west",
+                 "born"="At born",
+                 "70 to 74"="At 70-74 y.o.")
+             ))+
+  firatheme::theme_fira()+
+  theme(legend.position = "none",
+        panel.spacing.y = unit(1.5,"lines"))
+```
+
+
+```{r}
+dt <- read_csv("lifetableallBR_panel.csv")
+
+dt_filter <- dt |> filter(location_name=="Bahia",
+                          age_group_name %in% c("<1 year",
+                                                "40 to 44",
+                                                "70 to 74"))
+
+dt_filter |> ggplot(aes(year_id,val, color=age_group_name))+
+  geom_line(size=1)+
+  theme_minimal()+
+  scale_x_continuous(breaks = seq(1950,2020,10))+
+  scale_y_continuous(limits = c(0,80),
+                     breaks = seq(0,80,10))+
+  labs(x="",
+       y="Additional life expactancy",
+       color="Age group")+
+  theme(legend.position = "bottom")
+
+```
+
