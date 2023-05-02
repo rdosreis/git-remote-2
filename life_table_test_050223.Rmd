@@ -17,6 +17,9 @@ pacman::p_load(tidyverse,
                ggrepel,
                broom)
 
+library(readr)
+lifetableallBR_panel <- read_csv("~/Downloads/lifetableallBR_panel.csv")
+
 dt <- lifetableallBR_panel
 
 dt |> count(location_name)
