@@ -344,7 +344,7 @@ ggplot()+
 
 
 ```{r}
-dt <- read_csv("lifetableallBR_panel.csv")
+dt <- lifetableallBR_panel
 
 dt_filter <- dt |> filter(location_name=="Bahia",
                           age_group_name %in% c("<1 year",
@@ -362,5 +362,15 @@ dt_filter |> ggplot(aes(year_id,val, color=age_group_name))+
        color="Age group")+
   theme(legend.position = "bottom")
 
+### modelling ###
+pacman::p_load(forestmangr)
+lm1 <- lm(val ~ year_id, data = dt_filter)
+lm1
+
+lmsubgroup <- dt_filter %>% 
+  group_by(age_group_name) %>% 
+  lm_table(val ~ year_id)
+
+lmsubgroup
 ```
 
