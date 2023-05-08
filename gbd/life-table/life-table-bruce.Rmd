@@ -1,0 +1,103 @@
+---
+title: "Brazil Life Table Plots"
+author: "Lucas Helal"
+date: "2023-04-16"
+output:
+  html_document: default
+  pdf_document: 
+    fig_caption: yes
+  classoption: portrait
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = F, message = F)
+```
+
+Briefing:
+
+In summary, in this exploratory analysis, I compared the additional life expectancy over nearly 70 years of evolution of two SDI different states. Data and graphical results clearly shows that life expectancy at birth was way sensible then Santa Catarina to be improved, reaching nearly the same life expectancy by the end of 2020. Also, between 40-44, improvements were not as substantial then at birth, and small improvements were found either for BA and SC for the approximate mean Brazilian life span. No conclusions can be drawn for instance but we may picture the hypothesis that efforts to augment the middle age and elderly life expectancy should be done and we shall look for potential reasons that may explain this discrete improvement.
+
+--------------------------------------------------------------------------------------------------------
+
+Step 1. Loading packages, reading data set, and filtering for Bahia and Santa Catarina as locations, and at birth, 40-44 (labor age) and 70-74 (mean lifespan) as age classes to check for trend thereafter. I also created a dummy variable for time (< 1981 and > 1981) as graphically seems that it highlights an inflection point. I choose Bahia because its presumed sensitivity along time to improve lifespan, and how the state was sensible as well to cash-transfer and other population-based intervention programs. 
+
+```{r}
+pacman::p_load(tidyverse,
+               tidylog,
+               readxl,
+               ggrepel,
+               broom)
+
+library(readr)
+lifetableallBR_panel <- read_csv("~/Downloads/lifetableallBR_panel.csv")
+
+dt <- lifetableallBR_panel
+
+dt_filter <- dt |> filter(location_name %in% c("Bahia", "Santa Catarina"),
+                          age_group_name %in% c("<1 year",
+                                                "40 to 44",
+                                                "70 to 74")) |>
+  mutate(split_year=if_else(year_id < 1981, "0", "1"))
+
+```
+
+Step 2. Here is a plot of additional life expectancy vs. time (1950 to 2020) for either Bahia and Santa Catarina, stratified by age groups (at birth, 40-44 and 70-74) and also with a reference line at 1980. Annotated is the mean difference for additional life expectancy between SC and BA before 1980, which seems to be greater. More details can be found in the contrast analysis further.   
+
+```{r}
+dt_filter |> ggplot(aes(year_id, val, color=location_name, shape=age_group_name))+
+  geom_point(size=0.8)+
+  geom_smooth(alpha=0.4, size=0.5)+
+  geom_vline(aes(xintercept=1980),linetype="dotted")+
+  theme_minimal()+
+  scale_x_continuous(breaks = seq(1950,2020,10))+
+  scale_y_continuous(limits = c(0,80),
+                     breaks = seq(0,80,10))+
+  labs(x="",
+       y="Additional life expactancy",
+       color="Age group")+
+  theme(legend.position = "bottom")+
+  annotate("text", x=1960, y=70, label="difSCxBA -4.71\n[-5.56 to -3.85]", size=6)
+```
+
+Step 3. I built not so complicated linear models to check for trend and contrasts, assuming our series as a linear model for this purpose (not declared as time seies). I also calculated the 'diff' by hand (not using the diff function of the time-series package) to stay with the data still as a panel data. 
+
+```{r}
+pacman::p_load(forestmangr, modelbased)
+lm1 <- lm(val ~ year_id*age_group_name*location_name*split_year, data = dt_filter)
+lm_con <-  estimate_contrasts(lm1, contrast = c("location_name", "age_group_name=c('<1 year')","split_year"))
+lm_con
+
+lm_res <- pacf(residuals(lm1))
+
+### diff ###
+
+dt_filter_diff <- dt_filter|>  
+  group_by(location_name,
+           age_group_name) |> 
+  mutate(diff_life = val- lag(val))
+
+dt_filter_diff
+```
+
+Step 4. Here the model was assumed as time-series (despite the syntax calls for a lm) and ran a piecewise regression to get the "explosion point" for Bahia in the age group "at birth", as a test. I found that 1994 was the turning point (graph below).
+
+```{r}
+
+pacman::p_load(segmented)
+
+dt_piece <- dt_filter |> filter(location_name=="Bahia", age_group_name=="<1 year")
+piece_dt <- lm(val ~ year_id, dt_piece)
+
+
+dt_seg <- segmented(piece_dt)
+summary(dt_seg)
+```
+
+Step 5. Here is the plot that clearly shows the decline after 1994 and this was around 3.5 years of additional life expectancy.
+
+```{r}
+plot(dt_seg)
+```
+
